@@ -1,0 +1,94 @@
+64x48 pixels, 3 cycles per pixel, pixel clock at 8/3=2.66 Mhz
+
+Need to hold the 16x12=192 bytes char buffer in memory
+16*2=32 bytes to hold the current (character) row of char pixels
+every fourth line is blank, so can use that to load the next line of char data from program memory?
+
+use SPI to drive pixel data
+might be able to have per-char color? really only two 2-color palettes since SPI will essentially choose between foreground/background.
+
+Full horizontal line: 800*8/25.175=254.22 cycles
+Active video: 640*8/25.175=~203 cycles
+Front porch: 16*8/25.175=~5 cycles
+Sync pulse: 96*8/25.175=~30.5 cycles, round up to 31
+Back porch: 48*8/25.175=~15 cycles
+
+Total vertical time: 524 lines
+Active video: 480 lines
+Front porch: 11 lines
+Sync pulse: 2 lines
+Back porch: 31 lines
+
+
+If each pixel is 3 cycles, that gives us 67 pixels.
+For 4x4 characters, we'll duplicate one column (either the first or the last)
+and blank the last row to make them 5x5 and give us extra cycles. That means
+65/5 = 13 characters wide.
+
+If each pixel is 2 cycles, that gives us 101 pixels.
+We could do a 20x16, which is nice and roundish :)
+
+out usicr ; 1
+out usicr
+out usicr ; 2
+out usicr
+out usicr ; 3
+out usicr
+out usicr ; 4
+out usicr
+ld r16, X+ ; load next byte
+(ld is 2 cycles)
+out usicr ; 5
+out usicr
+out usicr ; 6
+out usicr
+out usicr ; 7
+out usicr
+out usicr ; 8
+out usicr ; can we omit/move this one? e.g. if it clocks the input that we don't care about
+out usidr, r16 ; push next byte into USI data reg
+nop
+
+
+; repeat above 8 times (since each iteration outputs 2 of the 16 chars)
+
+; end of the last one looks like this
+
+out usicr ; 4
+out usicr
+nop ; no memory load needed
+nop
+out usicr ; 5
+out usicr
+out usicr ; 6
+out usicr
+out usicr ; 7
+out usicr
+out usicr ; 8
+out usicr ; pixel 99, cycle 198 (1-indexed)
+; pixel 99 and pixel 100 are the same, so don't need to do anything more.
+; in each sync, we need to grab 3 bytes from ram, turn them into 4 characters,
+; then grab those 4 characters from rom.
+ldd r0, Y ; 199
+ldd r1, Y+1 ; 201
+ldd r2, Y+2 ; 203. video frames officially end here.
+; 5 frame front porch starts on clock 2 of the above ldd. HSync should already be high, so no need to do anything
+nop
+nop
+nop
+nop
+; TODO: Which cycle is the pin actually low? I suppose it doesn't matter a ton as long as the length is right?
+cbi PORTC, HSYNC_PIN ; 2 cycles. 209. Sync starts here.
+; -- 31 - 2 = 29 nops until back porch
+sbi PORTC, HSYNC_PIN ; 2 cyncles. 240. Sync ends here.
+; -- 15 - 2 = 13 nops until next row of pixels
+nop ; final nop, 254 total cycles
+
+
+===
+
+
+Memory needs
+20x15=300 byte text buffer, but can shrink to 225 if we use 3 bytes for every
+4 characters (6-bit encoding)
+10 bytes for the pixels of the current line (really, current 6 lines)
