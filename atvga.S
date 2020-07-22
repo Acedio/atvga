@@ -11,18 +11,16 @@ nop
 nop
 nop
 nop
-nop
-rjmp hsync_start
-nop
+rjmp hsync_start ; Timer 1 compare match B.
 nop
 nop
 nop
-
-#define STACK_TOP 0x100
+nop
+nop
 
 #define COLOR_PIN 1
-#define HSYNC_PIN 3
-#define VSYNC_PIN 4
+#define HSYNC_PIN 4
+#define VSYNC_PIN 3
 #define LED_PIN 2
 
 #define LINE_LREG 24
@@ -32,11 +30,6 @@ nop
 .global main
 main:
   cli
-  ; Intialize stack
-  ; ldi r16, lo8(STACK_TOP)
-  ; out _SFR_IO_ADDR(SPL), r16
-  ; ldi r16, hi8(STACK_TOP)
-  ; out _SFR_IO_ADDR(SPH), r16
 
   ; Output pins.
   ldi r16, _BV(COLOR_PIN) | _BV(HSYNC_PIN) | _BV(VSYNC_PIN) | _BV(LED_PIN)
@@ -48,32 +41,35 @@ main:
   sbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
   cbi _SFR_IO_ADDR(PORTB), LED_PIN
 
-  ; Set up timer 0 to control hsync
+  ; Set up timer 1 to control hsync
 
-  ; WGM[2:0] = 0b010 sets up CTC (clears counter on each match of OCRA)
-  ; Setting COM0A and COM0B to 0 disconnects the counter from pins.
-  ldi r16, _BV(WGM01)
-  out _SFR_IO_ADDR(TCCR0A), r16
+  ; CS1[3:0] = 0b010 scales CK/2 for the timer input.
+  ldi r16, _BV(CS11)
+  ; ldi r16, _BV(CS13) | _BV(CS12) | _BV(CS11) | _BV(CS10)
+  out _SFR_IO_ADDR(TCCR1), r16
 
-  ; CS[2:0] = 0b001 sets the clock source to use I/O clk with no prescaler
-  ldi r16, _BV(CS00)
-  out _SFR_IO_ADDR(TCCR0B), r16
+  ; PWM1B enables PWM with OCR1B.
+  ; COM1B[1:0] = 0b11 causes OC1B to set on compare match and clear at 0.
+  ldi r16, _BV(PWM1B) | _BV(COM1B1) ;| _BV(COM1B0)
+  out _SFR_IO_ADDR(GTCCR), r16
 
-  ; Fire an interrupt when the counter hits 253, i.e. once every 254 cycles.
+  ; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
+  ; When the counter hits 253, i.e. once every 254 cycles, it resets to 0 and
+  ; sets OC1B.
   ldi r16, 253
-  out _SFR_IO_ADDR(OCR0A), r16
+  out _SFR_IO_ADDR(OCR1C), r16
 
-  ; Enable interrupts for when OCR0A is hit.
-  ldi r16, _BV(OCIE0A)
+  ; When OCR1B is matched, OC1B is cleared.
+  ldi r16, 253-30
+  out _SFR_IO_ADDR(OCR1B), r16
+
+  ; Enable interrupts for when OCR1B is hit.
+  ldi r16, _BV(OCIE1B)
   out _SFR_IO_ADDR(TIMSK), r16
 
   ; Clear the interrupt flag just in case it's set.
-  ldi r16, _BV(OCF0A)
-  out _SFR_IO_ADDR(TIMSK), r16
-
-  ; Clear TSM just in case.
-  ldi r16, 0
-  out _SFR_IO_ADDR(GTCCR), r16
+  ldi r16, _BV(OCF1B)
+  out _SFR_IO_ADDR(TIFR), r16
 
   ; Start on line 0.
   ldi LINE_LREG, 0
@@ -86,49 +82,30 @@ loop:
   rjmp loop
 
 hsync_start:
-  cbi _SFR_IO_ADDR(PORTB), HSYNC_PIN ; 2 clk
-  ; wait 29 more clks for a 31 clk sync pulse
-  .rept 29
-  nop
-  .endr
-  sbi _SFR_IO_ADDR(PORTB), HSYNC_PIN ; 2 clk
-  
+  ; There should be 76 cycles between start of the hsync pulse and pixels.
   adiw LINE_LREG, 1 ; 2
   movw r26, LINE_LREG ; 1
+  ; Line 480 is the last line of pixels.
   subi r26, lo8(480) ; 1
   sbci r27, hi8(480) ; 1
   brcs 1f; 2
   rjmp pixels_done
 1:
 
-  ; Wait 6 more cycles to make back porch = 15
-  .rept 6
+  ; 7 cycles up til now, wait the rest until 76 have been taken total.
+  .rept 76-7
   nop
   .endr
 
   ; Painting starts.
+  .rept 30
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
+  nop
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
+  nop
+  .endr
   reti
 
 pixels_done:
