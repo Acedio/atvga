@@ -23,6 +23,13 @@ nop
 #define VSYNC_PIN 3
 #define LED_PIN 2
 
+; At 16Mhz exactly this would be ~254, but it seems as though the clock is fast.
+; At 254, this clocked in at 6923.08 BPH (via
+; http://www.beatsperminuteonline.com/), or 1.92307777778 BPS. It should clock
+; in at 1.875 BPS (60/32).
+#define CLOCKS_PER_LINE 130
+; Amount of time the HSYNC pin should be held low during the sync pulse.
+#define PULSE_LENGTH 16
 #define LINE_LREG 24
 
 #define LINES 525
@@ -43,8 +50,8 @@ main:
 
   ; Set up timer 1 to control hsync
 
-  ; CS1[3:0] = 0b010 scales CK/2 for the timer input.
-  ldi r16, _BV(CS11)
+  ; CS1[3:0] = 0b011 scales CK/4 for the timer input.
+  ldi r16, _BV(CS11) | _BV(CS10)
   ; ldi r16, _BV(CS13) | _BV(CS12) | _BV(CS11) | _BV(CS10)
   out _SFR_IO_ADDR(TCCR1), r16
 
@@ -56,11 +63,11 @@ main:
   ; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
   ; When the counter hits 253, i.e. once every 254 cycles, it resets to 0 and
   ; sets OC1B.
-  ldi r16, 253
+  ldi r16, CLOCKS_PER_LINE-1
   out _SFR_IO_ADDR(OCR1C), r16
 
   ; When OCR1B is matched, OC1B is cleared.
-  ldi r16, 253-30
+  ldi r16, CLOCKS_PER_LINE - PULSE_LENGTH
   out _SFR_IO_ADDR(OCR1B), r16
 
   ; Enable interrupts for when OCR1B is hit.
@@ -89,7 +96,7 @@ hsync_start:
   subi r26, lo8(480) ; 1
   sbci r27, hi8(480) ; 1
   brcs 1f; 2
-  rjmp pixels_done
+  rjmp vert_refresh
 1:
 
   ; 7 cycles up til now, wait the rest until 76 have been taken total.
@@ -98,7 +105,7 @@ hsync_start:
   .endr
 
   ; Painting starts.
-  .rept 30
+  .rept 10
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
@@ -106,9 +113,15 @@ hsync_start:
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
   nop
   .endr
+  .rept 10
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
+  nop
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
+  nop
+  .endr
   reti
 
-pixels_done:
+vert_refresh:
   ; vsync starts on line 490...
   cpi LINE_LREG, lo8(490)
   brne 1f
@@ -142,13 +155,12 @@ pixels_done:
 ; blink LED at a fraction of the Vrefresh
   inc r0 
   mov r16, r0
-  andi r16, 64
+  andi r16, 16
   breq 2f
   sbi _SFR_IO_ADDR(PORTB), LED_PIN
   rjmp 1f
 2:
   cbi _SFR_IO_ADDR(PORTB), LED_PIN
-
 1:
 
   reti
