@@ -23,20 +23,40 @@ nop
 #define VSYNC_PIN 3
 #define LED_PIN 2
 
-; At 16Mhz exactly this would be ~254, but it seems as though the clock is fast.
-; At 254, this clocked in at 6923.08 BPH (via
-; http://www.beatsperminuteonline.com/), or 1.92307777778 BPS. It should clock
-; in at 1.875 BPS (60/32).
-#define CLOCKS_PER_LINE 130
-; Amount of time the HSYNC pin should be held low during the sync pulse.
-#define PULSE_LENGTH 16
 #define LINE_LREG 24
 
-#define LINES 525
+; Number of system clock ticks per timer tick. This needs to match what is set
+; in TCCRx.
+#define CLOCKS_PER_TICK 2
+; 250 is a nice base in that it's under 256 (fits in a TCNTx) and all the HSYNC
+; timings we need are divisors of it. This is in timer ticks (/2), not clock
+; ticks.
+#define TICKS_PER_LINE 250
+; Amount of TCNTx ticks the HSYNC pin should be held low during the sync pulse.
+; Note that this is halved relative to the system clock because of the timer
+; prescaler (it's really 60 clock ticks).
+#define HSYNC_TICKS 30
+; In system clock ticks.
+#define HSYNC_BPORCH 30
+
+#define VISIBLE_LINES 480
+#define VSYNC_FPORCH 10
+#define VSYNC_LENGTH 2
+#define VSYNC_BPORCH 33
 
 .global main
 main:
   cli
+
+  ; Trim the clock so we're close to an easily divisible clock freq (such that
+  ; 250 clocks is a line and 30 is the hsync length).
+  in r16, _SFR_IO_ADDR(OSCCAL)
+  subi r16, 3
+  out _SFR_IO_ADDR(OSCCAL), r16
+  subi r16, 3
+  out _SFR_IO_ADDR(OSCCAL), r16
+  subi r16, 3
+  out _SFR_IO_ADDR(OSCCAL), r16
 
   ; Output pins.
   ldi r16, _BV(COLOR_PIN) | _BV(HSYNC_PIN) | _BV(VSYNC_PIN) | _BV(LED_PIN)
@@ -50,9 +70,8 @@ main:
 
   ; Set up timer 1 to control hsync
 
-  ; CS1[3:0] = 0b011 scales CK/4 for the timer input.
-  ldi r16, _BV(CS11) | _BV(CS10)
-  ; ldi r16, _BV(CS13) | _BV(CS12) | _BV(CS11) | _BV(CS10)
+  ; CS1[3:0] = 0b010 scales CK/2 for the timer input.
+  ldi r16, _BV(CS11)
   out _SFR_IO_ADDR(TCCR1), r16
 
   ; PWM1B enables PWM with OCR1B.
@@ -63,11 +82,11 @@ main:
   ; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
   ; When the counter hits 253, i.e. once every 254 cycles, it resets to 0 and
   ; sets OC1B.
-  ldi r16, CLOCKS_PER_LINE-1
+  ldi r16, TICKS_PER_LINE-1
   out _SFR_IO_ADDR(OCR1C), r16
 
   ; When OCR1B is matched, OC1B is cleared.
-  ldi r16, CLOCKS_PER_LINE - PULSE_LENGTH
+  ldi r16, TICKS_PER_LINE - HSYNC_TICKS
   out _SFR_IO_ADDR(OCR1B), r16
 
   ; Enable interrupts for when OCR1B is hit.
@@ -78,89 +97,110 @@ main:
   ldi r16, _BV(OCF1B)
   out _SFR_IO_ADDR(TIFR), r16
 
-  ; Start on line 0.
-  ldi LINE_LREG, 0
-  ldi LINE_LREG+1, 0
+  ; Start on line -1.
+  ldi LINE_LREG, lo8(-1)
+  ldi LINE_LREG+1, hi8(-1)
 
   ; Enable interrupts.
   sei
 
 loop:
+  lpm r3, Z ; takes 3 cycles (does nothing, for testing)
   rjmp loop
 
 hsync_start:
-  ; There should be 76 cycles between start of the hsync pulse and pixels.
+  ; Depending on the instruction that was executing when the interrupt happened,
+  ; we may be off by as many as two cycles.
+  in r16, _SFR_IO_ADDR(TCNT1) ; 1
+  cpi r16, 0xE1 ; 1
+  brlt 1f ; 1 (technically 1 or 2, but if it's 2 then we're correcting to make it seem like 1)
+1:
+
+  ; There should be 90 cycles between start of the hsync pulse and pixels.
+  ; Ideally, the start of the pulse would be _now_, but there is a bit of lag
+  ; introduced by the interrupt handling. This lag is at least 7 cycles, but in
+  ; testing it seems like ~10 is the usual.
   adiw LINE_LREG, 1 ; 2
   movw r26, LINE_LREG ; 1
-  ; Line 480 is the last line of pixels.
-  subi r26, lo8(480) ; 1
-  sbci r27, hi8(480) ; 1
-  brcs 1f; 2
+  ; Line 479 is the last line of pixels. If we're on line 480, stop drawing.
+  subi r26, lo8(VISIBLE_LINES) ; 1
+  sbci r27, hi8(VISIBLE_LINES) ; 1
+  brcs 1f ; 2
   rjmp vert_refresh
 1:
 
-  ; 7 cycles up til now, wait the rest until 76 have been taken total.
-  .rept 76-7
+  ; 11 + ~10 (for interrupt handling) cycles up til now, wait the rest until 90
+  ; have been taken total.
+  .rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10)
   nop
   .endr
 
   ; Painting starts.
-  .rept 10
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  nop
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  nop
+  .rept 100
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   .endr
-  .rept 10
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  nop
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
-  nop
-  .endr
+
+/*
+; Output r16 on the color pin.
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+.rept 8
+  lsl r16 ; 1
+  brcs 1f ; 1/2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  rjmp 2f ; 2
+1:
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  nop ; 1
+2:
+.endr
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+*/
+
   reti
 
 vert_refresh:
-  ; vsync starts on line 490...
-  cpi LINE_LREG, lo8(490)
+; vsync starts on line 490...
+  cpi LINE_LREG, lo8(VISIBLE_LINES + VSYNC_FPORCH)
   brne 1f
-  cpi LINE_LREG+1, hi8(490)
+  cpi LINE_LREG+1, hi8(VISIBLE_LINES + VSYNC_FPORCH)
   brne 1f
-  ; Line 490: vsync start
+; Line 490: vsync start
   cbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
   reti
 1:
 
-  ; ... and ends on line 492
-  cpi LINE_LREG, lo8(492)
+; ... and ends on line 492
+  cpi LINE_LREG, lo8(VISIBLE_LINES + VSYNC_FPORCH + VSYNC_LENGTH)
   brne 1f
-  cpi LINE_LREG+1, hi8(492)
+  cpi LINE_LREG+1, hi8(VISIBLE_LINES + VSYNC_FPORCH + VSYNC_LENGTH)
   brne 1f
-  ; Line 492: vsync end
+; Line 492: vsync end
   sbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
   reti
 1:
 
-  cpi LINE_LREG+1, hi8(LINES)
-  brlo 1f
-  brne 2f ; if somehow greater, reset immediately
-  cpi LINE_LREG, lo8(LINES)
-  brlo 1f
-  ; Line $LINES is the last line (1 indexed). Reset to 0.
-2:
-  ldi LINE_LREG, 0
-  ldi LINE_LREG+1, 0
-
-; blink LED at a fraction of the Vrefresh
-  inc r0 
-  mov r16, r0
-  andi r16, 16
-  breq 2f
-  sbi _SFR_IO_ADDR(PORTB), LED_PIN
-  rjmp 1f
-2:
-  cbi _SFR_IO_ADDR(PORTB), LED_PIN
+; Line $TOTAL_LINES-1 is the last line (0 indexed). Reset to -1, which will
+; increment to 0 during the next hsync.
+  cpi LINE_LREG+1, hi8(VISIBLE_LINES + VSYNC_FPORCH + VSYNC_LENGTH + VSYNC_BPORCH - 1)
+  brne 1f
+  cpi LINE_LREG, lo8(VISIBLE_LINES + VSYNC_FPORCH + VSYNC_LENGTH + VSYNC_BPORCH - 1)
+  brne 1f
+  ldi LINE_LREG, lo8(-1)
+  ldi LINE_LREG+1, hi8(-1)
 1:
 
   reti
