@@ -128,19 +128,29 @@ hsync_start:
   brcs 1f ; 2
   rjmp vert_refresh
 1:
+  ; 11 + ~10 (for interrupt handling) cycles up til now.
 
-  ; 11 + ~10 (for interrupt handling) cycles up til now, wait the rest until 90
-  ; have been taken total.
-  .rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10)
+  ldi r16, _BV(USIWM0) | _BV(USICLK) ; 1
+
+  .rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 1)
   nop
   .endr
 
-  ; Painting starts.
-  .rept 100
-  sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  ; Painting starts. 400 ticks.
+.rept 50
+  out _SFR_IO_ADDR(USIDR), LINE_LREG ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+.endr
+  ; We need to turn off serial so we can reclaim the color pin.
+  ldi r16, 0 ; 1
+  out _SFR_IO_ADDR(USICR), r16 ; 1
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
-  .endr
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
 
 /*
 ; Output r16 on the color pin.
