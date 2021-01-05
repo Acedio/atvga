@@ -101,11 +101,19 @@ main:
   ldi LINE_LREG, lo8(-1)
   ldi LINE_LREG+1, hi8(-1)
 
+  ; Clear the memory read/write registers.
+  ldi XL, 0
+  ldi XH, 1
+  ldi YL, 0
+  ldi YH, 1
+  ldi ZL, 0
+  ldi ZH, 0
+
   ; Enable interrupts.
   sei
 
 loop:
-  lpm r3, Z ; takes 3 cycles (does nothing, for testing)
+  lpm r3, Z ; takes 3 cycles (does nothing, for testing interrupt timing)
   rjmp loop
 
 hsync_start:
@@ -121,33 +129,71 @@ hsync_start:
   ; introduced by the interrupt handling. This lag is at least 7 cycles, but in
   ; testing it seems like ~10 is the usual.
   adiw LINE_LREG, 1 ; 2
-  movw r26, LINE_LREG ; 1
+  movw r16, LINE_LREG ; 1
   ; Line 479 is the last line of pixels. If we're on line 480, stop drawing.
-  subi r26, lo8(VISIBLE_LINES) ; 1
-  sbci r27, hi8(VISIBLE_LINES) ; 1
+  subi r16, lo8(VISIBLE_LINES) ; 1
+  sbci r17, hi8(VISIBLE_LINES) ; 1
   brcs 1f ; 2
   rjmp vert_refresh
 1:
-  ; 11 + ~10 (for interrupt handling) cycles up til now.
+  ; 11 + ~10 (for interrupt handling) cycles up to this point.
 
+  ; X is the memory write address
+  ; Y is the memory read address, should be reset to a base value each line
+  ; Z is the program read address
+  ; Two 16 byte buffers that we swap between.
+  ; Rather than hogging both X and Y we can probably just use one and some other
+  ; <16 register for storage.
+.rept 8
+  lpm r16, Z+ ; 3
+  st X+, r16 ; 2
+.endr
+  andi XL, 0x1F ; 1
+; Initialize Y to the beginning of the buffer that X is not writing to.
+  mov YL, XL ; 1
+  ldi r16, 0x10 ; 1
+  eor YL, r16 ; 1
+; Make sure we're not starting in the middle of a line.
+  andi YL, 0xF0 ; 1
+; Initialize the data register.
+  ld r16, Y+ ; 2
+  out _SFR_IO_ADDR(USIDR), r16 ; 1
   ldi r16, _BV(USIWM0) | _BV(USICLK) ; 1
 
-  .rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 1)
+.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 49)
   nop
-  .endr
+.endr
 
   ; Painting starts. 400 ticks.
-.rept 50
-  out _SFR_IO_ADDR(USIDR), LINE_LREG ; 1
+.rept 16
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  nop
+  nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
+  ld r17, Y+ ; 2
+  out _SFR_IO_ADDR(USICR), r16 ; 1
+  out _SFR_IO_ADDR(USIDR), r17 ; 1
+  nop
 .endr
-  ; We need to turn off serial so we can reclaim the color pin.
+.rept 12
+  nop
+.endr
+  ; Turn off serial so we can reclaim the color pin.
   ldi r16, 0 ; 1
   out _SFR_IO_ADDR(USICR), r16 ; 1
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
@@ -211,6 +257,12 @@ vert_refresh:
   brne 1f
   ldi LINE_LREG, lo8(-1)
   ldi LINE_LREG+1, hi8(-1)
+  ldi XL, 0
+  ldi XH, 1
+  ldi YL, 0
+  ldi YH, 1
+  ldi ZL, 0
+  ldi ZH, 0
 1:
 
   reti
