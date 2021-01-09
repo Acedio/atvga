@@ -1,5 +1,11 @@
 #include <avr/io.h>
 
+; Fuse bytes for ATTiny85
+; EFUSE and HFUSE at default
+; LFUSE = 0xCF
+; (No clk div, no clk out, slow rising power, ceramic resonator >8MHz)
+; XTAL1 and XTAL2 have a 16MHz ceramic resonator connected.
+
 .text
 ; Interrupt vectors.
 rjmp main ; RESET
@@ -48,16 +54,6 @@ nop
 .global main
 main:
   cli
-
-  ; Trim the clock so we're close to an easily divisible clock freq (such that
-  ; 250 clocks is a line and 30 is the hsync length).
-  in r16, _SFR_IO_ADDR(OSCCAL)
-  subi r16, 3
-  out _SFR_IO_ADDR(OSCCAL), r16
-  subi r16, 3
-  out _SFR_IO_ADDR(OSCCAL), r16
-  subi r16, 3
-  out _SFR_IO_ADDR(OSCCAL), r16
 
   ; Set up output pins.
   ; The color pin (PB1) is OC1A, which would be toggled as a timer output if we
@@ -205,8 +201,10 @@ hsync_start:
   ; Turn off serial so we can reclaim control of the color pin.
   ldi r16, 0 ; 1
   out _SFR_IO_ADDR(USICR), r16 ; 1
-  cbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2. Color pin as input so it doesn't output
-                                    ; the inverse HSYNC pulses.
+  ; Bring the color pin low so the line is in a consistant state at end.
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  ; Color pin as input so it doesn't output the inverse HSYNC pulses.
+  cbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2. Disable pullup.
 
 /*
@@ -302,7 +300,6 @@ vert_refresh:
 .ascii "                "
 .ascii "                "
 */
-/*
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -471,4 +468,3 @@ vert_refresh:
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-*/
