@@ -6,22 +6,23 @@ rjmp main ; RESET
 nop
 nop
 nop
+rjmp hsync_start ; Timer 1 overflow.
 nop
 nop
 nop
 nop
 nop
-rjmp hsync_start ; Timer 1 compare match B.
 nop
 nop
 nop
 nop
 nop
 
+; PB1 is the data output for three-wire mode SPI.
 #define COLOR_PIN 1
-#define HSYNC_PIN 4
-#define VSYNC_PIN 3
-#define LED_PIN 2
+; PB0 is the inverted OC1A (~OC1A) output.
+#define HSYNC_PIN 0
+#define VSYNC_PIN 2
 
 #define LINE_LREG 24
 
@@ -58,25 +59,32 @@ main:
   subi r16, 3
   out _SFR_IO_ADDR(OSCCAL), r16
 
-  ; Output pins.
-  ldi r16, _BV(COLOR_PIN) | _BV(HSYNC_PIN) | _BV(VSYNC_PIN) | _BV(LED_PIN)
+  ; Set up output pins.
+  ; The color pin (PB1) is OC1A, which would be toggled as a timer output if we
+  ; didn't set it as an input here. It will be set as an output only when we're
+  ; outputting video.
+  ldi r16, _BV(HSYNC_PIN) | _BV(VSYNC_PIN)
   out _SFR_IO_ADDR(DDRB), r16
 
+  ; Disable the pullup on the color pin because we have a pull-down setup there.
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN
+
   ; Sync pins start high (pulse low)
   sbi _SFR_IO_ADDR(PORTB), HSYNC_PIN
   sbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
-  cbi _SFR_IO_ADDR(PORTB), LED_PIN
 
   ; Set up timer 1 to control hsync
 
+  ; PWM1A enables PWM with OCR1A.
+  ; COM1A[1:0] = 0b01 causes ~OC1A (inverted) to set on compare match and clear
+  ; at 0. This means the HSYNC pulse starts at 0.
   ; CS1[3:0] = 0b010 scales CK/2 for the timer input.
-  ldi r16, _BV(CS11)
+  ldi r16, _BV(PWM1A) | _BV(COM1A0) | _BV(CS11)
   out _SFR_IO_ADDR(TCCR1), r16
 
   ; PWM1B enables PWM with OCR1B.
   ; COM1B[1:0] = 0b11 causes OC1B to set on compare match and clear at 0.
-  ldi r16, _BV(PWM1B) | _BV(COM1B1) ;| _BV(COM1B0)
+  ldi r16, 0
   out _SFR_IO_ADDR(GTCCR), r16
 
   ; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
@@ -85,16 +93,16 @@ main:
   ldi r16, TICKS_PER_LINE-1
   out _SFR_IO_ADDR(OCR1C), r16
 
-  ; When OCR1B is matched, OC1B is cleared.
-  ldi r16, TICKS_PER_LINE - HSYNC_TICKS
-  out _SFR_IO_ADDR(OCR1B), r16
+  ; When OCR1A is matched, ~OC1A (inverted) is set (end of the HSYNC pulse).
+  ldi r16, HSYNC_TICKS
+  out _SFR_IO_ADDR(OCR1A), r16
 
-  ; Enable interrupts for when OCR1B is hit.
-  ldi r16, _BV(OCIE1B)
+  ; Enable interrupts for when OCR1A is hit.
+  ldi r16, _BV(TOIE1)
   out _SFR_IO_ADDR(TIMSK), r16
 
   ; Clear the interrupt flag just in case it's set.
-  ldi r16, _BV(OCF1B)
+  ldi r16, _BV(TOV1)
   out _SFR_IO_ADDR(TIFR), r16
 
   ; Start on line -1.
@@ -143,7 +151,7 @@ hsync_start:
   ; Z is the program read address
   ; Two 16 byte buffers that we swap between.
   ; Rather than hogging both X and Y we can probably just use one and some other
-  ; <16 register for storage.
+  ; <16 register for storage of the LSB.
 .rept 8
   lpm r16, Z+ ; 3
   st X+, r16 ; 2
@@ -159,8 +167,9 @@ hsync_start:
   ld r16, Y+ ; 2
   out _SFR_IO_ADDR(USIDR), r16 ; 1
   ldi r16, _BV(USIWM0) | _BV(USICLK) ; 1
+  sbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2. Color pin as output.
 
-.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 49)
+.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 51)
   nop
 .endr
 
@@ -193,10 +202,12 @@ hsync_start:
 .rept 12
   nop
 .endr
-  ; Turn off serial so we can reclaim the color pin.
+  ; Turn off serial so we can reclaim control of the color pin.
   ldi r16, 0 ; 1
   out _SFR_IO_ADDR(USICR), r16 ; 1
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2. Color pin as input so it doesn't output
+                                    ; the inverse HSYNC pulses.
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2. Disable pullup.
 
 /*
 ; Output r16 on the color pin.
@@ -291,6 +302,7 @@ vert_refresh:
 .ascii "                "
 .ascii "                "
 */
+/*
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -459,3 +471,4 @@ vert_refresh:
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+*/
