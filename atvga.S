@@ -69,37 +69,54 @@ main:
   sbi _SFR_IO_ADDR(PORTB), HSYNC_PIN
   sbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
 
-  ; Set up timer 1 to control hsync
+; Set up the two timers. Timer 1 is used to control the HSYNC pin and uses a
+; prescaler, while timer 0 has the same phase but no prescaler.
 
-  ; PWM1A enables PWM with OCR1A.
-  ; COM1A[1:0] = 0b01 causes ~OC1A (inverted) to set on compare match and clear
-  ; at 0. This means the HSYNC pulse starts at 0.
-  ; CS1[3:0] = 0b010 scales CK/2 for the timer input.
+; Pause both timers so we can initialize them. This also disables OC1B output.
+  ldi r16, _BV(TSM) | _BV(PSR1) | _BV(PSR0)
+  out _SFR_IO_ADDR(GTCCR), r16
+
+; Set up timer 1 to control hsync.
+
+; PWM1A enables PWM with OCR1A.
+; COM1A[1:0] = 0b01 causes ~OC1A (inverted) to set on compare match and clear
+; at 0. This means the HSYNC pulse starts at 0.
+; CS1[3:0] = 0b010 scales CK/2 for the timer input.
   ldi r16, _BV(PWM1A) | _BV(COM1A0) | _BV(CS11)
   out _SFR_IO_ADDR(TCCR1), r16
 
-  ; PWM1B enables PWM with OCR1B.
-  ; COM1B[1:0] = 0b11 causes OC1B to set on compare match and clear at 0.
-  ldi r16, 0
-  out _SFR_IO_ADDR(GTCCR), r16
-
-  ; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
-  ; When the counter hits 253, i.e. once every 254 cycles, it resets to 0 and
-  ; sets OC1B.
+; OCR1C is the top value of timer1. Interrupt TOV1 is fired after the match.
+; When the counter hits 253, i.e. once every 254 cycles, it resets to 0 and
+; clears OC1A.
   ldi r16, TICKS_PER_LINE-1
   out _SFR_IO_ADDR(OCR1C), r16
 
-  ; When OCR1A is matched, ~OC1A (inverted) is set (end of the HSYNC pulse).
+; When OCR1A is matched, ~OC1A (inverted) is set (end of the HSYNC pulse).
   ldi r16, HSYNC_TICKS
   out _SFR_IO_ADDR(OCR1A), r16
 
-  ; Enable interrupts for when OCR1A is hit.
+; Enable interrupts for when the counter overflows (the sync pulse starts).
   ldi r16, _BV(TOIE1)
   out _SFR_IO_ADDR(TIMSK), r16
 
-  ; Clear the interrupt flag just in case it's set.
+; Clear the interrupt flag just in case it's set.
   ldi r16, _BV(TOV1)
   out _SFR_IO_ADDR(TIFR), r16
+
+; Set up timer0 to be in the same phase as timer1, but at the system clock
+; speed. This is used to correct for delays in interrupt handling (since the
+; time it takes to serve an interrupt depends on how many cycles the currently
+; running instruction takes).
+
+; No compare match output, CTC mode.
+  ldi r16, _BV(WGM01)
+  out _SFR_IO_ADDR(TCCR0A), r16
+; No prescaling.
+  ldi r16, _BV(CS00)
+  out _SFR_IO_ADDR(TCCR0B), r16
+; Same number of ticks as timer1 (no prescaler so twice as fast).
+  ldi r16, TICKS_PER_LINE-1
+  out _SFR_IO_ADDR(OCR0A), r16
 
   ; Start on line -1.
   ldi LINE_LREG, lo8(-1)
@@ -113,7 +130,16 @@ main:
   ldi ZL, 0
   ldi ZH, 0
 
-  ; Enable interrupts.
+; Clear both counters so they start at the same value.
+  ldi r16, 0
+  out _SFR_IO_ADDR(TCNT0), r16
+  out _SFR_IO_ADDR(TCNT1), r16
+
+; Unleash the timers! This resets both and initiates counting.
+  ldi r16, _BV(PSR1) | _BV(PSR0)
+  out _SFR_IO_ADDR(GTCCR), r16
+
+; Enable interrupts.
   sei
 
 loop:
@@ -122,16 +148,20 @@ loop:
 
 hsync_start:
   ; Depending on the instruction that was executing when the interrupt happened,
-  ; we may be off by as many as two cycles.
-  in r16, _SFR_IO_ADDR(TCNT1) ; 1
-  cpi r16, 0xE1 ; 1
+  ; we may be off by as many as two cycles. Add delays here so we always start
+  ; painting on the same cycle.
+  in r18, _SFR_IO_ADDR(TCNT0) ; 1
+  cpi r18, 0x0A ; 1
+  brlt 1f ; 1 (technically 1 or 2, but if it's 2 then we're correcting to make it seem like 1)
+1:
+  cpi r18, 0x09 ; 1
   brlt 1f ; 1 (technically 1 or 2, but if it's 2 then we're correcting to make it seem like 1)
 1:
 
   ; There should be 90 cycles between start of the hsync pulse and pixels.
   ; Ideally, the start of the pulse would be _now_, but there is a bit of lag
-  ; introduced by the interrupt handling. This lag is at least 7 cycles, but in
-  ; testing it seems like ~10 is the usual.
+  ; introduced by the interrupt handling. This lag is at least 7 cycles, more if
+  ; a greater than 1 cycle instruction is running.
   adiw LINE_LREG, 1 ; 2
   movw r16, LINE_LREG ; 1
   ; Line 479 is the last line of pixels. If we're on line 480, stop drawing.
@@ -140,7 +170,7 @@ hsync_start:
   brcs 1f ; 2
   rjmp vert_refresh
 1:
-  ; 11 + ~10 (for interrupt handling) cycles up to this point.
+  ; 14 + ~7 (for interrupt handling) cycles up to this point.
 
   ; X is the memory write address
   ; Y is the memory read address, should be reset to a base value each line
@@ -159,13 +189,18 @@ hsync_start:
   eor YL, r16 ; 1
 ; Make sure we're not starting in the middle of a line.
   andi YL, 0xF0 ; 1
+; Turn off the compare outputs for timer1 so they don't override our color pin.
+; NOTE: This doesn't seem to actually matter when using PB1 as SPI out. Can
+; probably remove this to save a few cycles.
+  ldi r16, _BV(PWM1A) | _BV(CS11) ; 1
+  out _SFR_IO_ADDR(TCCR1), r16 ; 1
+  sbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2
 ; Initialize the data register.
   ld r16, Y+ ; 2
   out _SFR_IO_ADDR(USIDR), r16 ; 1
   ldi r16, _BV(USIWM0) | _BV(USICLK) ; 1
-  sbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2. Color pin as output.
 
-.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (11 + 10 + 51)
+.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 53)
   nop
 .endr
 
@@ -203,12 +238,9 @@ hsync_start:
   out _SFR_IO_ADDR(USICR), r16 ; 1
   ; Bring the color pin low so the line is in a consistant state at end.
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
-  ; Color pin as input so it doesn't output the inverse HSYNC pulses.
-  cbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2
-  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2. Disable pullup.
 
 /*
-; Output r16 on the color pin.
+; Output r18 on the color pin.
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
@@ -217,7 +249,7 @@ hsync_start:
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
 .rept 8
-  lsl r16 ; 1
+  lsl r18 ; 1
   brcs 1f ; 1/2
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   rjmp 2f ; 2
@@ -234,6 +266,13 @@ hsync_start:
   sbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
 */
+
+; Color pin as input so it doesn't output the inverse HSYNC pulses.
+  cbi _SFR_IO_ADDR(DDRB), COLOR_PIN ; 2
+  cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2. Disable pullup.
+; Turn the compare outputs back on.
+  ldi r16, _BV(PWM1A) | _BV(COM1A0) | _BV(CS11)
+  out _SFR_IO_ADDR(TCCR1), r16
 
   reti
 
@@ -300,6 +339,7 @@ vert_refresh:
 .ascii "                "
 .ascii "                "
 */
+/*
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -468,3 +508,4 @@ vert_refresh:
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+*/
