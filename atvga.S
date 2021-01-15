@@ -31,7 +31,7 @@ nop
 #define VSYNC_PIN 2
 
 #define SCANLINE_LREG 24
-#define SCANLINE_PIXEL_REG 18
+#define PIXEL_SCANLINE_REG 18
 #define PIXELY_REG 19
 
 ; Number of system clock ticks per timer tick. This needs to match what is set
@@ -56,6 +56,12 @@ nop
 .global main
 main:
   cli
+
+  ; Set up the stack.
+  ldi r16, 0x5E
+  out _SFR_IO_ADDR(SPL), r16
+  ldi r16, 0x02
+  out _SFR_IO_ADDR(SPH), r16
 
   ; Set up output pins.
   ; The color pin (PB1) is OC1A, which would be toggled as a timer output if we
@@ -126,7 +132,7 @@ main:
 
 ; Initialize the tilemap to something interesting.
   ldi XL, 0x20
-  ldi XH, 0
+  ldi XH, 1
   ldi r16, 0
 1:
   st X+, r16
@@ -141,7 +147,7 @@ main:
   ldi YH, 1
   ldi ZL, 0
   ldi ZH, hi8(TILE_DATA)
-  ldi SCANLINE_PIXEL_REG, 0
+  ldi PIXEL_SCANLINE_REG, 0
   ldi PIXELY_REG, 0
 
 ; Clear both counters so they start at the same value.
@@ -187,7 +193,7 @@ hsync_start:
 ; 14 + ~7 (for interrupt handling) cycles up to this point.
 
 ; == LOAD PIXEL DATA ==
-;       52 cycles
+;       53 cycles
 
 ; Memory layout:
 ; 0x00 - 0x1F : Two line buffers. One is being written to while the
@@ -198,15 +204,16 @@ hsync_start:
 ; X scrolls through the tilemap (16x12) and starts at 0x20.
 ; Z is always used for reading bitmap data.
 
-; SCANLINE_PIXEL_REG contains which subline of the current row of pixels we're
-; on (each scanline is actually 5 pixels tall).
-  cpi SCANLINE_PIXEL_REG, 4 ; 1
+; PIXEL_SCANLINE_REG contains which scanline of the current row of pixels we're
+; on (each pixel is actually 5 scanlines tall).
+  cpi PIXEL_SCANLINE_REG, 4 ; 1
   brlo 1f ; 2
   rjmp final_line ; 2. For the final pixel we'll see 4 ticks up to this point.
 1:
 
 ; We can determine which of the two line buffers we're writing to based on the
-; LSB of pixel.Y.
+; LSB of pixel.Y. When painting the lower buffer (0x00), write the upper buffer
+; (0x10).
   mov YL, PIXELY_REG ; 1
   andi YL, 1 ; 1
   swap YL ; 1
@@ -227,8 +234,8 @@ hsync_start:
   lsr XL ; 1
   lsr XL ; 1
   lsr XL ; 1
-; 4 tiles at a time.
-  mov r16, SCANLINE_PIXEL_REG ; 1
+; 4 tiles at a time, so multiply the scanline by 4 to get our initial tile.
+  mov r16, PIXEL_SCANLINE_REG ; 1
   lsl r16 ; 1
   lsl r16 ; 1
   add XL, r16 ; 1
@@ -236,6 +243,9 @@ hsync_start:
   add YL, r16 ; 1
 ; Offset by 0x20.
   subi XL, -0x20 ; 1
+
+; Increment PIXEL_SCANLINE_REG now that we've used it for indexing.
+  inc PIXEL_SCANLINE_REG ; 1
 
 .rept 4
   ld ZL, X+ ; 2
@@ -247,7 +257,13 @@ hsync_start:
 
 ; == BURN TIME ==
 ;    ?? cycles
-.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 52 + 8)
+
+#define HSYNC_WAIT_TICKS (HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 53 + 8))
+.if HSYNC_WAIT_TICKS < 0
+.err ; Too much work during HSYNC!
+.endif
+
+.rept HSYNC_WAIT_TICKS
   nop
 .endr
 
@@ -342,7 +358,7 @@ paint_start:
 
 final_line: ; 5 clocks so far.
 ; Reset to the first of 5 lines.
-  ldi SCANLINE_PIXEL_REG, 0 ; 1
+  ldi PIXEL_SCANLINE_REG, 0 ; 1
   inc PIXELY_REG ; 1
 .rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 8 + 8)
   nop
@@ -378,7 +394,7 @@ vert_refresh:
   brne 1f
   ldi SCANLINE_LREG, lo8(-1)
   ldi SCANLINE_LREG+1, hi8(-1)
-  ldi SCANLINE_PIXEL_REG, 0
+  ldi PIXEL_SCANLINE_REG, 0
   ldi PIXELY_REG, 0
   ldi XL, 0
   ldi XH, 1
@@ -392,7 +408,6 @@ vert_refresh:
 
 .balign 256
 TILE_DATA:
-/*
 ; Test pattern.
 .rept 16
 .byte 0xFF, 0x00
@@ -421,7 +436,6 @@ TILE_DATA:
 .rept 16
 .byte 0xFF, 0x00
 .endr
-*/
 /*
 .ascii "                "
 .ascii "                "
@@ -901,6 +915,7 @@ TILE_DATA:
 .endr
 */
 
+/*
 ; Saturn
 .rept 2
 .byte 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001, 0b11000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000
@@ -1190,3 +1205,4 @@ TILE_DATA:
 .rept 2
 .byte 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b01111111, 0b11111110, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000
 .endr
+*/
