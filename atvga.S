@@ -141,7 +141,7 @@ main:
   brlo 1b
 
   ldi XL, 0x20
-  ldi r16, 0xF8
+  ldi r16, 0x00
 .rept 16
   st X+, r16
 .endr
@@ -276,7 +276,7 @@ hsync_start:
 .endr
 
 ; == PAINT INIT ==
-;     8 cycles
+;     6 cycles + 2 cycles (before the first pixel data is actually output)
 paint_start:
 ; Turn off the compare outputs for timer1 so they don't override our color pin.
 ; NOTE: This doesn't seem to actually matter when using PB1 as SPI out. Can
@@ -287,14 +287,14 @@ paint_start:
   ldi r16, _BV(USIWM0) | _BV(USICLK) ; 1
 ; Reset Y to the beginning of the line buffer being read.
   mov YL, r4 ; 1
-; Fetch the first value.
-  ld r17, Y+ ; 2
 
 ; TODO: It looks like the first pixel of each line isn't painted.
 
 ; == PAINTING ==
 ;   400 cycles
 .rept 16
+; Fetch the character data from the line buffer.
+  ld r17, Y+ ; 2
 ; It looks like the MSB of USIDR is immediately visible on the color pin.
   out _SFR_IO_ADDR(USIDR), r17 ; 1
   nop
@@ -318,12 +318,10 @@ paint_start:
   nop
   nop
   out _SFR_IO_ADDR(USICR), r16 ; 1
-  ld r17, Y+ ; 2
-.endr
-.rept 12
-  nop
 .endr
   ; Turn off serial so we can reclaim control of the color pin.
+  ; Ensure two cycles so the last pixel is full width.
+  nop ; 1
   ldi r16, 0 ; 1
   out _SFR_IO_ADDR(USICR), r16 ; 1
   ; Bring the color pin low so the line is in a consistant state at end.
@@ -419,7 +417,8 @@ vert_refresh:
 .balign 256
 TILE_DATA:
 ; 0x00 to 0xFF
-.byte 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+; .byte 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+.byte 0b00111100, 0b01000010, 0b10100101, 0b10000001, 0b10100101, 0b10011001, 0b01000010, 0b00111100
 .byte 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f
 .byte 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17
 .byte 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f
