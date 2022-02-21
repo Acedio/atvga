@@ -181,9 +181,9 @@ loop:
   rjmp loop
 
 hsync_start:
-  ; Depending on the instruction that was executing when the interrupt happened,
-  ; we may be off by as many as two cycles. Add delays here so we always start
-  ; painting on the same cycle.
+; Depending on the instruction that was executing when the interrupt happened,
+; we may be off by as many as two cycles. Add delays here so we always start
+; painting on the same cycle.
   in r16, _SFR_IO_ADDR(TCNT0) ; 1
   cpi r16, 0x0A ; 1
   brlt 1f ; 1 (technically 1 or 2, but if it's 2 then we're correcting to make it seem like 1)
@@ -192,22 +192,26 @@ hsync_start:
   brlt 1f ; 1 (technically 1 or 2, but if it's 2 then we're correcting to make it seem like 1)
 1:
 
-  ; There should be 90 cycles between start of the hsync pulse and pixels.
-  ; Ideally, the start of the pulse would be _now_, but there is a bit of lag
-  ; introduced by the interrupt handling. This lag is at least 7 cycles, more if
-  ; a greater than 1 cycle instruction is running.
+; Save registers.
+  push XL ; 2
+  push XH ; 2
+
+; There should be 90 cycles between start of the hsync pulse and pixels.
+; Ideally, the start of the pulse would be _now_, but there is a bit of lag
+; introduced by the interrupt handling. This lag is at least 7 cycles, more if a
+; greater than 1 cycle instruction is running.
   adiw SCANLINE_LREG, 1 ; 2
   movw r16, SCANLINE_LREG ; 1
-  ; Line 479 is the last line of pixels. If we're on line 480, stop drawing.
+; Line 479 is the last line of pixels. If we're on line 480, stop drawing.
   subi r16, lo8(VISIBLE_LINES) ; 1
   sbci r17, hi8(VISIBLE_LINES) ; 1
   brcs 1f ; 2
   rjmp vert_refresh
 1:
-; 14 + ~7 (for interrupt handling) cycles up to this point.
+; 16 + ~7 (for interrupt handling) cycles up to this point.
 
 ; == LOAD PIXEL DATA ==
-;       53 cycles
+;       59 cycles
 
 ; Memory layout:
 ; 0x00 - 0x1F : Two line buffers. One is being written to while the
@@ -221,7 +225,10 @@ hsync_start:
 ; PIXEL_SCANLINE_REG contains which scanline of the current row of pixels we're
 ; on (each pixel is actually 5 scanlines tall).
   cpi PIXEL_SCANLINE_REG, 4 ; 1
-  brlo 1f ; 2
+
+#define BEFORE_FINAL_LINE_BRANCH_TICKS (16 + 7 + 1)
+
+  brlo 1f ; 2 or 1 if no jump
   rjmp final_line ; 2. For the final pixel we'll see 4 ticks up to this point.
 1:
 
@@ -250,13 +257,14 @@ hsync_start:
   ror r17 ; 1
   ror r17 ; 1
   andi r17, 0xC0 ; 1, just the top two bits
-; Add any carry to ZH.
+; Add the carry to ZH.
   ldi ZH, hi8(TILE_DATA) ; 1
-  clr r0 ; 1
-  adc ZH, r0 ; 1
+  clr r16 ; 1
+  adc ZH, r16 ; 1
 
 ; X is our pointer into the tilemap memory. The tile row is the top 5 bits of
 ; PIXELY. We can multiply that by 16 to get the offset into the tilemap.
+  ldi XH, 1 ; 1
   mov XL, PIXELY_REG ; 1
   andi XL, 0xF8 ; 1
   lsl XL ; 1
@@ -286,7 +294,14 @@ hsync_start:
 ; == BURN TIME ==
 ;    ?? cycles
 
-#define HSYNC_WAIT_TICKS (HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 59 + 8))
+#define HSYNC_PLUS_BACK_PORCH_TICKS (HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH)
+; TODO: The -1 here is cheating because we're one cycle over where we need to
+;       be. We should be able to save some cycles by reading/writing values to
+;       memory (like the tile row offset) rather than recalculating them every
+;       HSYNC.
+#define POST_WAIT_TICKS (6 + 2    - 1)
+#define WHEN_COPY_TICKS (BEFORE_FINAL_LINE_BRANCH_TICKS + 59 + POST_WAIT_TICKS)
+#define HSYNC_WAIT_TICKS (HSYNC_PLUS_BACK_PORCH_TICKS - WHEN_COPY_TICKS)
 .if HSYNC_WAIT_TICKS < 0
 .err ; Too much work during HSYNC!
 .endif
@@ -354,6 +369,9 @@ paint_start:
   ldi r16, _BV(PWM1A) | _BV(COM1A0) | _BV(CS11)
   out _SFR_IO_ADDR(TCCR1), r16
 
+clean:
+  pop XH ; 2
+  pop XL ; 2
   reti
 
 /*
@@ -384,11 +402,12 @@ paint_start:
   cbi _SFR_IO_ADDR(PORTB), COLOR_PIN ; 2
 */
 
-final_line: ; 5 clocks so far.
+final_line: ; 3 clocks since BEFORE_FINAL_LINE_BRANCH_TICKS
 ; Reset to the first of 5 lines.
   ldi PIXEL_SCANLINE_REG, 0 ; 1
   inc PIXELY_REG ; 1
-.rept HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH - (14 + 7 + 8 + 8)
+#define WHEN_NO_COPY_TICKS (BEFORE_FINAL_LINE_BRANCH_TICKS + 7 + POST_WAIT_TICKS)
+.rept HSYNC_PLUS_BACK_PORCH_TICKS - WHEN_NO_COPY_TICKS
   nop
 .endr
   rjmp paint_start ; 2
@@ -401,7 +420,7 @@ vert_refresh:
   brne 1f
 ; Line 490: vsync start
   cbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
-  reti
+  rjmp clean
 1:
 
 ; ... and ends on line 492
@@ -411,7 +430,7 @@ vert_refresh:
   brne 1f
 ; Line 492: vsync end
   sbi _SFR_IO_ADDR(PORTB), VSYNC_PIN
-  reti
+  rjmp clean
 1:
 
 ; Line $TOTAL_LINES-1 is the last line (0 indexed). Reset to -1, which will
@@ -432,22 +451,22 @@ vert_refresh:
   ldi ZH, hi8(TILE_DATA)
 1:
 
-  reti
+  rjmp clean
 
 .balign 256
 INITIAL_TILEMAP:
-.ascii "                "
-.ascii " HEY BRO,       "
-.ascii "                "
-.ascii "   I FINALLY    "
-.ascii " STARTED WORKIN'"
-.ascii " ON THIS THING  "
-.ascii "   AGAIN!! :D   "
-.ascii "                "
-.ascii "  ALSO, HOW IS  "
-.ascii " EARTHBOUND SO  "
-.ascii "  DANG GOOD???  "
-.ascii "                "
+.ascii "/\\/\\/\\/\\/\\/\\/\\/\\"
+.ascii "\\/\\/           /"
+.ascii "/\\/          ! \\"
+.ascii "\\/    @VGA     /"
+.ascii "/              \\"
+.ascii "\\      BY      /"
+.ascii "/              \\"
+.ascii "\\    ACEDIO    /"
+.ascii "/     2022    /\\"
+.ascii "\\ ?          /\\/"
+.ascii "/           /\\/\\"
+.ascii "\\/\\/\\/\\/\\/\\/\\/\\/"
 
 .balign 256
 TILE_DATA:
