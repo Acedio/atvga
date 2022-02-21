@@ -176,8 +176,23 @@ main:
 ; Enable interrupts.
   sei
 
+  ldi XH, 1
+  ldi XL, 0x20
 loop:
-  lpm r0, Z ; takes 3 cycles (does nothing, for testing interrupt timing)
+
+; "Randomly" mutate characters by adding the scanline reg to them.
+  ldi r23, 0
+1:
+  inc r23
+  brne 1b
+
+  ld r23, X
+  add r23, PIXEL_SCANLINE_REG
+  andi r23, 0x3F
+  st X+, r23
+  cpi XL, 0x20 + 16*12
+  brlo loop
+  ldi XL, 0x20
   rjmp loop
 
 hsync_start:
@@ -193,8 +208,10 @@ hsync_start:
 1:
 
 ; Save registers.
+; TODO: Document which registers are mutated in this interrupt routine.
   push XL ; 2
   push XH ; 2
+  in r22, _SFR_IO_ADDR(SREG) ; 1
 
 ; There should be 90 cycles between start of the hsync pulse and pixels.
 ; Ideally, the start of the pulse would be _now_, but there is a bit of lag
@@ -208,7 +225,7 @@ hsync_start:
   brcs 1f ; 2
   rjmp vert_refresh
 1:
-; 16 + ~7 (for interrupt handling) cycles up to this point.
+; 17 + ~7 (for interrupt handling) cycles up to this point.
 
 ; == LOAD PIXEL DATA ==
 ;       59 cycles
@@ -226,7 +243,7 @@ hsync_start:
 ; on (each pixel is actually 5 scanlines tall).
   cpi PIXEL_SCANLINE_REG, 4 ; 1
 
-#define BEFORE_FINAL_LINE_BRANCH_TICKS (16 + 7 + 1)
+#define BEFORE_FINAL_LINE_BRANCH_TICKS (17 + 7 + 1)
 
   brlo 1f ; 2 or 1 if no jump
   rjmp final_line ; 2. For the final pixel we'll see 4 ticks up to this point.
@@ -295,11 +312,11 @@ hsync_start:
 ;    ?? cycles
 
 #define HSYNC_PLUS_BACK_PORCH_TICKS (HSYNC_TICKS * CLOCKS_PER_TICK + HSYNC_BPORCH)
-; TODO: The -1 here is cheating because we're one cycle over where we need to
+; TODO: The -2 here is cheating because we're one cycle over where we need to
 ;       be. We should be able to save some cycles by reading/writing values to
 ;       memory (like the tile row offset) rather than recalculating them every
 ;       HSYNC.
-#define POST_WAIT_TICKS (6 + 2    - 1)
+#define POST_WAIT_TICKS (6 + 2    - 2)
 #define WHEN_COPY_TICKS (BEFORE_FINAL_LINE_BRANCH_TICKS + 59 + POST_WAIT_TICKS)
 #define HSYNC_WAIT_TICKS (HSYNC_PLUS_BACK_PORCH_TICKS - WHEN_COPY_TICKS)
 .if HSYNC_WAIT_TICKS < 0
@@ -370,6 +387,7 @@ paint_start:
   out _SFR_IO_ADDR(TCCR1), r16
 
 clean:
+  out _SFR_IO_ADDR(SREG), r22 ; 1
   pop XH ; 2
   pop XL ; 2
   reti
